@@ -6,21 +6,34 @@ const path = require('path');
 const readline = require('readline');
 const { execSync } = require('child_process');
 const http = require('http');
+const { PostgresAuthState } = require('./auth-pg');
 
 // ===================== HTTP SERVER (for Render) =====================
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Cagula-orgBOTwa is running! ✅\nScan QR in logs to connect WhatsApp.');
 }).listen(PORT, () => {
     console.log(`🌐 HTTP server running on port ${PORT}`);
 });
 
+// ===================== KEEP-ALIVE (Render Free Tier) =====================
+if (process.env.RENDER_EXTERNAL_URL) {
+    setInterval(() => {
+        http.get(process.env.RENDER_EXTERNAL_URL, (res) => {
+            console.log(`[KEEP-ALIVE] Ping OK — ${res.statusCode}`);
+        }).on('error', (e) => {
+            console.log(`[KEEP-ALIVE] Ping error: ${e.message}`);
+        });
+    }, 10 * 60 * 1000); // la fiecare 10 minute
+    console.log('⏰ Keep-alive activat (previne spin-down pe Render Free)');
+}
+
 // ===================== AUTO-UPDATE =====================
 function autoUpdate() {
     try {
         console.log('🔄 Verificare actualizari...');
-        execSync('npm update baileys @hapi/boom pino pino-pretty qrcode', { stdio: 'inherit' });
+        execSync('npm update baileys @hapi/boom pino pino-pretty qrcode pg', { stdio: 'inherit' });
         console.log('✅ Dependinte actualizate!');
     } catch (e) {
         console.log('⚠️ Nu s-au putut actualiza dependintele:', e.message);
@@ -504,7 +517,18 @@ async function startup() {
 // ===================== BAILEYS =====================
 async function connectBot() {
     try {
-        const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+        let authState;
+        if (process.env.DATABASE_URL) {
+            console.log('🔐 Folosesc PostgreSQL pentru sesiune persistenta...');
+            const pgAuth = new PostgresAuthState(process.env.DATABASE_URL);
+            authState = await pgAuth.getState();
+            console.log('✅ Sesiune incarcata din PostgreSQL');
+        } else {
+            console.log('⚠️  DATABASE_URL negasit — folosesc auth local (se va pierde la restart!)');
+            authState = await useMultiFileAuthState('./auth_info');
+        }
+
+        const { state, saveCreds } = authState;
         const { version } = await fetchLatestBaileysVersion();
         logger.info(`Baileys v${version.join('.')}`);
         sock = makeWASocket({
@@ -524,20 +548,14 @@ async function connectBot() {
             if (qr && !qrGenerated) {
                 qrGenerated = true;
                 try {
-                    // Save QR as image file
                     await QRCode.toFile('./qr.png', qr, { width: 500, margin: 2 });
                     console.log('\n📱 QR CODE SALVAT!');
                     console.log('   Fisier: qr.png');
-
-                    // Also print QR as ASCII in terminal for easy scanning
                     console.log('\n╔══════════════════════════════════════╗');
                     console.log('║     📱 SCANEAZA QR-UL DE MAI JOS     ║');
                     console.log('╚══════════════════════════════════════╝\n');
-
-                    // Generate ASCII QR
                     const asciiQR = await QRCode.toString(qr, { type: 'terminal', small: true });
                     console.log(asciiQR);
-
                     console.log('\n📲 WhatsApp → Setari → Dispozitive → Conecteaza\n');
                 } catch (e) {
                     console.error('Eroare salvare QR:', e.message);
